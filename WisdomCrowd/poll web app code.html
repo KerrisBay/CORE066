@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Number Poll</title>
+  <!-- Chart.js and Firebase CDN Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <style>
+    body { 
+      font-family: system-ui, -apple-system, sans-serif; 
+      max-width: 600px; 
+      margin: 2rem auto; 
+      padding: 0 1rem; 
+      color: #333;
+    }
+    .card { 
+      border: 1px solid #e2e8f0; 
+      padding: 1.5rem; 
+      border-radius: 8px; 
+      margin-bottom: 1rem; 
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .hidden { display: none !important; }
+    input[type="number"] { 
+      padding: 0.5rem; 
+      font-size: 1rem; 
+      border: 1px solid #cbd5e1; 
+      border-radius: 4px;
+      width: 100%;
+      box-sizing: border-box;
+      margin-bottom: 0.75rem;
+    }
+    button { 
+      padding: 0.6rem 1.2rem; 
+      font-size: 1rem; 
+      cursor: pointer; 
+      background-color: #2563eb; 
+      color: white; 
+      border: none; 
+      border-radius: 4px; 
+      font-weight: 500;
+    }
+    button:hover { background-color: #1d4ed8; }
+    button:disabled { background-color: #94a3b8; cursor: not-allowed; }
+    .admin-panel { 
+      background: #f8fafc; 
+      border: 1px dashed #64748b; 
+      margin-top: 2rem;
+    }
+    .admin-panel button { 
+      margin-right: 0.5rem; 
+      margin-bottom: 0.5rem;
+    }
+    .btn-danger { background-color: #dc2626; }
+    .btn-danger:hover { background-color: #b91c1c; }
+    .btn-secondary { background-color: #475569; }
+    .btn-secondary:hover { background-color: #334155; }
+    #mean-display {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #0f172a;
+      margin-bottom: 1rem;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>Community Number Poll</h2>
+
+  <!-- VOTING SECTION (Visible when poll is open) -->
+  <div id="voting-section" class="card">
+    <h3>Submit Your Number</h3>
+    <input type="number" id="user-input" placeholder="Enter a number" step="any">
+    <button id="submit-btn">Submit Vote</button>
+    <p id="vote-status" style="color: #059669; font-weight: 500;"></p>
+  </div>
+
+  <!-- RESULTS SECTION (Visible when poll is closed) -->
+  <div id="results-section" class="card hidden">
+    <h3>Poll Results</h3>
+    <p id="mean-display">Calculating summary statistics...</p>
+    <canvas id="histogramChart"></canvas>
+  </div>
+
+  <!-- ADMIN CONTROLS (Hidden by default, unlocked via URL parameter) -->
+  <div id="admin-panel" class="card admin-panel hidden">
+    <h4>Admin Controls</h4>
+    <p>Status: <strong id="admin-status-text">Loading...</strong></p>
+    <button id="toggle-poll-btn" class="btn-secondary">Toggle Poll State (Open/Close)</button>
+    <button id="reset-btn" class="btn-danger">Reset All Data</button>
+  </div>
+
+  <script>
+    // ------------------------------------------------------------------
+    // 1. CONFIGURATION
+    // ------------------------------------------------------------------
+    // Secret key required in URL (?admin=secret123) to view Admin Controls
+    const ADMIN_SECRET = "secret123";
+
+    // Replace with your project details from Firebase Console
+    const firebaseConfig = {
+  apiKey: "AIzaSyDd6yixqsl5XKoDoEzatO-IZVfPkErI26A",
+  authDomain: "wisdom-of-the-crowd-f7c82.firebaseapp.com",
+  databaseURL: "https://wisdom-of-the-crowd-f7c82-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "wisdom-of-the-crowd-f7c82",
+  storageBucket: "wisdom-of-the-crowd-f7c82.firebasestorage.app",
+  messagingSenderId: "483087509962",
+  appId: "1:483087509962:web:a57698c0f69506af3f4733",
+  measurementId: "G-0P7XTG9FEH"
+};
+
+    // Initialize Firebase
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    // Elements
+    const votingSection = document.getElementById('voting-section');
+    const resultsSection = document.getElementById('results-section');
+    const submitBtn = document.getElementById('submit-btn');
+    const userInput = document.getElementById('user-input');
+    const voteStatus = document.getElementById('vote-status');
+    const adminPanel = document.getElementById('admin-panel');
+    const togglePollBtn = document.getElementById('toggle-poll-btn');
+    const resetBtn = document.getElementById('reset-btn');
+    const adminStatusText = document.getElementById('admin-status-text');
+    let chartInstance = null;
+
+    // ------------------------------------------------------------------
+    // 2. ADMIN PANEL SECURITY CHECK
+    // ------------------------------------------------------------------
+    const urlParams = new URLSearchParams(window.location.search);
+    const isAdmin = urlParams.get('admin') === ADMIN_SECRET;
+
+    if (isAdmin) {
+      adminPanel.classList.remove('hidden');
+
+      togglePollBtn.addEventListener('click', () => {
+        db.ref('pollState').once('value', (snapshot) => {
+          const currentState = snapshot.val() !== false;
+          db.ref('pollState').set(!currentState);
+        });
+      });
+
+      resetBtn.addEventListener('click', () => {
+        if (confirm("Are you sure you want to delete all votes and re-open the poll?")) {
+          db.ref('votes').remove();
+          db.ref('pollState').set(true);
+          location.reload();
+        }
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // 3. LISTEN FOR POLL STATE (REALTIME SYNC)
+    // ------------------------------------------------------------------
+    db.ref('pollState').on('value', (snapshot) => {
+      const isOpen = snapshot.val() !== false; // Defaults to open if null
+      adminStatusText.innerText = isOpen ? "OPEN (Accepting Votes)" : "CLOSED (Displaying Results)";
+
+      if (isOpen) {
+        votingSection.classList.remove('hidden');
+        resultsSection.classList.add('hidden');
+      } else {
+        votingSection.classList.add('hidden');
+        resultsSection.classList.remove('hidden');
+        fetchAndRenderResults();
+      }
+    });
+
+    // ------------------------------------------------------------------
+    // 4. SUBMIT VOTE
+    // ------------------------------------------------------------------
+    submitBtn.addEventListener('click', () => {
+      const val = parseFloat(userInput.value);
+      if (isNaN(val)) return alert("Please enter a valid numeric value.");
+
+      db.ref('votes').push(val, (error) => {
+        if (!error) {
+          voteStatus.innerText = "Vote submitted! Results will be revealed when the host closes the poll.";
+          submitBtn.disabled = true;
+          userInput.disabled = true;
+        } else {
+          alert("Error submitting vote: " + error.message);
+        }
+      });
+    });
+
+    // ------------------------------------------------------------------
+    // 5. CALCULATE STATS & RENDER HISTOGRAM
+    // ------------------------------------------------------------------
+    function fetchAndRenderResults() {
+      db.ref('votes').once('value', (snapshot) => {
+        const dataObj = snapshot.val() || {};
+        const values = Object.values(dataObj);
+
+        if (values.length === 0) {
+          document.getElementById('mean-display').innerText = "No votes were recorded.";
+          return;
+        }
+
+        // Compute Mean
+        const mean = values.reduce((acc, curr) => acc + curr, 0) / values.length;
+        document.getElementById('mean-display').innerText = 
+          `N = ${values.length} | Mean (μ) = ${mean.toFixed(2)}`;
+
+        // Build frequency map for numeric values
+        const counts = {};
+        values.forEach(v => counts[v] = (counts[v] || 0) + 1);
+        
+        const labels = Object.keys(counts).map(Number).sort((a, b) => a - b);
+        const dataCounts = labels.map(k => counts[k]);
+
+        // Render via Chart.js
+        const ctx = document.getElementById('histogramChart').getContext('2d');
+        if (chartInstance) chartInstance.destroy();
+
+        chartInstance = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: labels,
+            datasets: [{
+              label: 'Frequency',
+              data: dataCounts,
+              backgroundColor: 'rgba(37, 99, 235, 0.6)',
+              borderColor: 'rgba(37, 99, 235, 1)',
+              borderWidth: 1,
+              barPercentage: 0.9,
+              categoryPercentage: 1.0
+            }]
+          },
+          options: {
+            responsive: true,
+            scales: {
+              y: { 
+                beginAtZero: true, 
+                ticks: { stepSize: 1 },
+                title: { display: true, text: 'Count' }
+              },
+              x: { 
+                title: { display: true, text: 'Value' } 
+              }
+            },
+            plugins: {
+              legend: { display: false }
+            }
+          }
+        });
+      });
+    }
+  </script>
+</body>
+</html>
